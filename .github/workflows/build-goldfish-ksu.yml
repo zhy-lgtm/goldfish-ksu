@@ -1,0 +1,102 @@
+name: build-goldfish-ksu
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: "KernelSU tag / branch"
+        required: true
+        default: "main"
+      kernel_branch:
+        description: "kernel_common branch"
+        required: true
+        default: "android12-5.10"
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/build-goldfish-ksu.yml"
+
+env:
+  KSU_REF: ${{ github.event.inputs.ksu_ref || 'main' }}
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'android12-5.10' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex libssl-dev libelf-dev dwarves rsync cpio kmod zstd \
+            clang lld llvm python3 make git
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth 1 --branch "$KERNEL_BRANCH" \
+            https://github.com/aosp-mirror/kernel_common.git kcommon
+          cd kcommon
+          git rev-parse --short HEAD
+
+      - name: Clone KernelSU
+        run: |
+          if ! git clone --depth 1 --branch "$KSU_REF" \
+               https://github.com/tiann/KernelSU.git KernelSU; then
+            rm -rf KernelSU
+            git clone --depth 1 https://github.com/tiann/KernelSU.git KernelSU
+          fi
+          ls KernelSU/kernel
+
+      - name: Integrate KernelSU into kernel tree
+        run: |
+          cd kcommon
+          ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" drivers/kernelsu
+          grep -q 'CONFIG_KSU' drivers/Kbuild || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Kbuild
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo "--- drivers/Kbuild ---"; tail -3 drivers/Kbuild
+          echo "--- drivers/Kconfig ---"; tail -3 drivers/Kconfig
+
+      - name: Configure kernel
+        run: |
+          cd kcommon
+          if [ -f arch/x86/configs/goldfish_defconfig ]; then
+            echo "using goldfish_defconfig"
+            make ARCH=x86_64 LLVM=1 goldfish_defconfig
+          else
+            echo "using x86_64 defconfig"
+            make ARCH=x86_64 LLVM=1 defconfig
+          fi
+          scripts/config --enable KSU
+          scripts/config --enable KALLSYMS
+          scripts/config --enable KALLSYMS_ALL
+          scripts/config --enable MODULES
+          scripts/config --disable DEBUG_INFO || true
+          make ARCH=x86_64 LLVM=1 olddefconfig
+          echo "--- key configs ---"
+          grep -E 'CONFIG_KSU|CONFIG_KALLSYMS_ALL|CONFIG_MODULES|CONFIG_SECURITY_SELINUX=' .config
+
+      - name: Build bzImage
+        run: |
+          cd kcommon
+          make ARCH=x86_64 LLVM=1 -j$(nproc) bzImage
+          ls -lh arch/x86/boot/bzImage
+
+      - name: Export raw Image (fallback format)
+        run: |
+          cd kcommon
+          objcopy -O binary -R .note -R .comment -S vmlinux arch/x86/boot/vmlinux.bin || true
+          ls -lh arch/x86/boot/vmlinux.bin || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: goldfish-ksu-kernel
+          path: |
+            kcommon/arch/x86/boot/bzImage
+            kcommon/arch/x86/boot/vmlinux.bin
+            kcommon/.config
+          if-no-files-found: error

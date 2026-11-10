@@ -6,7 +6,7 @@ on:
       ksu_ref:
         description: "KernelSU tag / branch"
         required: true
-        default: "v0.9.5"
+        default: "v3.3.1"
   push:
     branches: [ main ]
     paths:
@@ -14,7 +14,7 @@ on:
       - "stock.config"
 
 env:
-  KSU_REF: ${{ github.event.inputs.ksu_ref || 'v0.9.5' }}
+  KSU_REF: ${{ github.event.inputs.ksu_ref || 'v3.3.1' }}
   # 原版 kernel-ranchu 的精确源码提交（kernel/common，与版本号 5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044 对应）
   KERNEL_SHA: "62a5f8e3accffd371afdff1652975e80d7dab30e"
   EXPECTED_RELEASE: "5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044"
@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 180
 
     steps:
+      - name: Checkout repo (stock.config)
+        uses: actions/checkout@v4
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -52,11 +55,14 @@ jobs:
         run: |
           cd common
           ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" drivers/kernelsu
-          grep -q 'CONFIG_KSU' drivers/Kbuild || \
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Kbuild
+          # 该树没有 drivers/Kbuild（GKI 已并入 drivers/Makefile）；绝不能新建 Kbuild，否则它会顶替 Makefile 导致整个 drivers 不编译
+          if [ -f drivers/Kbuild ]; then kb=drivers/Kbuild; else kb=drivers/Makefile; fi
+          echo "use $kb"
+          grep -q 'CONFIG_KSU' "$kb" || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> "$kb"
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
             echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          tail -2 drivers/Kbuild
+          tail -2 "$kb"
           tail -2 drivers/Kconfig
 
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)

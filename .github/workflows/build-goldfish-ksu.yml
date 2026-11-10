@@ -18,6 +18,8 @@ env:
   # 原版 kernel-ranchu 的精确源码提交（kernel/common，与版本号 5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044 对应）
   KERNEL_SHA: "62a5f8e3accffd371afdff1652975e80d7dab30e"
   EXPECTED_RELEASE: "5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044"
+  # 在 /tmp 下编译：避免 setlocalversion 发现上层 .git 给版本号追加 "+"
+  BUILD_DIR: "/tmp/ksu"
 
 jobs:
   build:
@@ -38,23 +40,22 @@ jobs:
       - name: Download exact kernel source (kernel/common @ stock commit)
         run: |
           set -euxo pipefail
-          cd "$GITHUB_WORKSPACE"
+          mkdir -p "$BUILD_DIR/common" && cd "$BUILD_DIR"
           curl -fL --retry 3 -o ksrc.tar.gz \
             "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/${KERNEL_SHA}"
           ls -lh ksrc.tar.gz
-          mkdir common
-          tar -xzf ksrc.tar.gz -C common --strip-components=1
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' common/Makefile
+          tar -xzf ksrc.tar.gz -C "$BUILD_DIR/common" --strip-components=1
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' "$BUILD_DIR/common/Makefile"
 
       - name: Clone KernelSU
         run: |
-          git clone --depth 1 --branch "$KSU_REF" https://github.com/tiann/KernelSU.git KernelSU
-          ls KernelSU/kernel
+          git clone --depth 1 --branch "$KSU_REF" https://github.com/tiann/KernelSU.git "$BUILD_DIR/KernelSU"
+          ls "$BUILD_DIR/KernelSU/kernel"
 
       - name: Integrate KernelSU into kernel tree
         run: |
-          cd common
-          ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" drivers/kernelsu
+          cd "$BUILD_DIR/common"
+          ln -sfn "$BUILD_DIR/KernelSU/kernel" drivers/kernelsu
           # 该树没有 drivers/Kbuild（GKI 已并入 drivers/Makefile）；绝不能新建 Kbuild，否则它会顶替 Makefile 导致整个 drivers 不编译
           if [ -f drivers/Kbuild ]; then kb=drivers/Kbuild; else kb=drivers/Makefile; fi
           echo "use $kb"
@@ -68,7 +69,7 @@ jobs:
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |
           set -euxo pipefail
-          cd common
+          cd "$BUILD_DIR/common"
           cp "$GITHUB_WORKSPACE/stock.config" .config
           # 精确复刻原版内核 release 字符串，保证 /lib/modules 里的模块 vermagic 匹配
           scripts/config --set-str LOCALVERSION "-android12-9-00039-g62a5f8e3accf-ab7647044"
@@ -83,7 +84,7 @@ jobs:
 
       - name: Build bzImage
         run: |
-          cd common
+          cd "$BUILD_DIR/common"
           set -o pipefail
           make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
           ls -lh arch/x86/boot/bzImage
@@ -93,13 +94,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: common/build.log
+          path: /tmp/ksu/common/build.log
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
           name: kernel-ranchu-ksu
           path: |
-            common/arch/x86/boot/bzImage
-            common/.config
+            /tmp/ksu/common/arch/x86/boot/bzImage
+            /tmp/ksu/common/.config
           if-no-files-found: error

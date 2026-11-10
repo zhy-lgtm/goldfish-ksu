@@ -33,10 +33,11 @@ jobs:
             bc bison flex libssl-dev libelf-dev dwarves rsync cpio kmod zstd \
             clang lld llvm python3 make git
 
-      - name: Clone goldfish kernel source (5.10.43)
+      - name: Clone goldfish kernel source (5.10.43) from googlesource
         run: |
-          git clone --depth 1 --branch "$GOLDFISH_TAG" \
-            https://github.com/aosp-mirror/kernel_goldfish.git goldfish
+          # googlesource 官方源，分支 android12-5.10（对应 5.10.43-android12）
+          git clone --depth 1 --branch "android12-5.10" \
+            https://android.googlesource.com/kernel/goldfish goldfish
           cd goldfish
           echo "Commit: $(git rev-parse HEAD)"
           echo "Version: $(cat Makefile | grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' | awk '{print $3}' | tr '\n' '.' | sed 's/\.$//')"

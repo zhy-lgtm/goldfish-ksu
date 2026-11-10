@@ -74,6 +74,8 @@ jobs:
           # 精确复刻原版内核 release 字符串，保证 /lib/modules 里的模块 vermagic 匹配
           scripts/config --set-str LOCALVERSION "-android12-9-00039-g62a5f8e3accf-ab7647044"
           scripts/config --disable LOCALVERSION_AUTO
+          # clang14 对老代码的新告警在 CONFIG_WERROR=y 下会变成 error，关掉（不影响生成代码与 vermagic）
+          scripts/config --disable WERROR
           # KernelSU 内建（不用模块）
           scripts/config --enable KSU
           make ARCH=x86_64 LLVM=1 olddefconfig

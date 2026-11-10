@@ -115,6 +115,16 @@ jobs:
           scripts/config --enable ZSMALLOC
           scripts/config --enable ZRAM
           scripts/config --enable MOUSE_PS2
+          # ===== 关闭 LTO/CFI：KernelSU 的 x86 syscall 钩子是运行时改机器码（patch_abs_jump），
+          # LTO 全量优化会合并/重排函数、CFI 会插检查桩，导致补丁跳错位置 -> init 首个 syscall panic
+          scripts/config --disable LTO_CLANG_FULL
+          scripts/config --disable LTO_CLANG_THIN
+          scripts/config --disable LTO_CLANG
+          scripts/config --disable LTO
+          scripts/config --enable LTO_NONE
+          scripts/config --disable CFI_CLANG
+          scripts/config --disable CFI_CLANG_SHADOW
+          scripts/config --disable CFI_PERMISSIVE
           make ARCH=x86_64 LLVM=1 olddefconfig
           rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
           echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"

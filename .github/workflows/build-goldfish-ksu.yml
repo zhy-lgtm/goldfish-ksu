@@ -12,6 +12,7 @@ on:
     paths:
       - ".github/workflows/build-goldfish-ksu.yml"
       - "stock.config"
+      - "ksu-syscall-hook.patch"
 
 env:
   KSU_REF: ${{ github.event.inputs.ksu_ref || 'v3.3.1' }}
@@ -50,6 +51,9 @@ jobs:
       - name: Clone KernelSU
         run: |
           git clone --depth 1 --branch "$KSU_REF" https://github.com/tiann/KernelSU.git "$BUILD_DIR/KernelSU"
+          # 修复 5.10 上 do_syscall_64 入口钩子导致的 panic（改用 .entry.text 汇编跳板）
+          git -C "$BUILD_DIR/KernelSU" apply -v "$GITHUB_WORKSPACE/ksu-syscall-hook.patch"
+          sed -n '215,340p' "$BUILD_DIR/KernelSU/kernel/hook/x86_64/syscall_hook.c"
           ls "$BUILD_DIR/KernelSU/kernel"
 
       - name: Integrate KernelSU into kernel tree
@@ -86,7 +90,9 @@ jobs:
           scripts/config --disable WERROR
           # KernelSU 内建（不用模块）
           scripts/config --enable KSU
-          # 原版内核对 x86_64 没打 indirect syscall 补丁；开启该选项改用运行时动态补丁 syscall 分发器
+          # 原版 5.10 没打 indirect syscall 补丁，必须开启运行时补丁分发器。
+          # 该选项在 5.10 上劫持 do_syscall_64；我们把 KSU 的入口钩子换成了 .entry.text 里的
+          # 汇编跳板（patch 见 ksu-syscall-hook.patch），修掉原先裸 C 函数在入口中间执行导致的 panic。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
           # ===== 关键驱动全部内建：绕开 ramdisk 模块的 CRC 不匹配问题 =====
           # 存储（第一阶段的根，必须先内建）

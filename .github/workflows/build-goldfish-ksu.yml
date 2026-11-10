@@ -7,18 +7,17 @@ on:
         description: "KernelSU tag / branch"
         required: true
         default: "v0.9.5"
-      goldfish_tag:
-        description: "goldfish branch/tag (android12-5.10)"
-        required: true
-        default: "android12-5.10"
   push:
     branches: [ main ]
     paths:
       - ".github/workflows/build-goldfish-ksu.yml"
+      - "stock.config"
 
 env:
   KSU_REF: ${{ github.event.inputs.ksu_ref || 'v0.9.5' }}
-  GOLDFISH_TAG: ${{ github.event.inputs.goldfish_tag || 'android12-5.10' }}
+  # 原版 kernel-ranchu 的精确源码提交（kernel/common，与版本号 5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044 对应）
+  KERNEL_SHA: "62a5f8e3accffd371afdff1652975e80d7dab30e"
+  EXPECTED_RELEASE: "5.10.43-android12-9-00039-g62a5f8e3accf-ab7647044"
 
 jobs:
   build:
@@ -31,104 +30,56 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison flex libssl-dev libelf-dev dwarves rsync cpio kmod zstd \
-            clang lld llvm python3 make git
+            clang lld llvm python3 make git curl
 
-      - name: Clone goldfish kernel source (5.10.43)
+      - name: Download exact kernel source (kernel/common @ stock commit)
         run: |
-          set -x
+          set -euxo pipefail
           cd "$GITHUB_WORKSPACE"
-          : > /tmp/clone_diag.log
-          log(){ echo "$*" | tee -a /tmp/clone_diag.log; }
+          curl -fL --retry 3 -o ksrc.tar.gz \
+            "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/${KERNEL_SHA}"
+          ls -lh ksrc.tar.gz
+          mkdir common
+          tar -xzf ksrc.tar.gz -C common --strip-components=1
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' common/Makefile
 
-          # 尝试1: googlesource tarball 直下（避免 git clone 网络问题）
-          log "===== 尝试1: googlesource tarball ====="
-          if timeout 600 curl -fL --retry 2 -o goldfish-src.tar.gz \
-              "https://android.googlesource.com/kernel/goldfish/+archive/refs/heads/android12-5.10.tar.gz" ; then
-            log "tarball size: $(stat -c%s goldfish-src.tar.gz)"
-            mkdir goldfish && tar -xzf goldfish-src.tar.gz -C goldfish && \
-              log "===== SUCCESS: googlesource tarball ====="
-            cd goldfish
-            echo "Commit: $( ([ -f .git ] || [ -d .git ] ) && git rev-parse HEAD 2>/dev/null || echo tarball-no-git)"
-            grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | head -3
-            exit 0
-          else
-            log "googlesource tarball FAILED rc=$?"
-          fi
-
-          # 尝试2: git clone 各镜像+分支
-          ok=0
-          for src in \
-            "https://android.googlesource.com/kernel/goldfish" \
-            "https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/goldfish" \
-            "https://gitclone.com/github.com/aosp-mirror/kernel_goldfish" \
-            "https://github.com/aosp-mirror/kernel_goldfish.git" ; do
-            for br in android12-5.10 android-5.10 android12-5.10-2022-08 ; do
-              log "===== TRY src=$src branch=$br ====="
-              if timeout 300 git clone --depth 1 --branch "$br" "$src" goldfish 2>>/tmp/clone_diag.log ; then
-                log "===== SUCCESS $src @ $br ====="
-                ok=1; break 2
-              fi
-              log "clone failed (see above)"
-              rm -rf goldfish
-            done
-          done
-          if [ "$ok" != "1" ]; then
-            echo "===== CLONE DIAG =====" >> "$GITHUB_STEP_SUMMARY"
-            cat /tmp/clone_diag.log >> "$GITHUB_STEP_SUMMARY"
-            cp /tmp/clone_diag.log "$GITHUB_WORKSPACE/clone_diag.log"
-            echo "ALL CLONE ATTEMPTS FAILED"; exit 1
-          fi
-
-      - name: Clone KernelSU (compatible with 5.10)
+      - name: Clone KernelSU
         run: |
-          if ! git clone --depth 1 --branch "$KSU_REF" \
-               https://github.com/tiann/KernelSU.git KernelSU; then
-            rm -rf KernelSU
-            git clone --depth 1 https://github.com/tiann/KernelSU.git KernelSU
-            cd KernelSU && git checkout v0.9.5 2>/dev/null || git checkout main
-          fi
+          git clone --depth 1 --branch "$KSU_REF" https://github.com/tiann/KernelSU.git KernelSU
           ls KernelSU/kernel
 
-      - name: Integrate KernelSU into goldfish tree
+      - name: Integrate KernelSU into kernel tree
         run: |
-          cd goldfish
+          cd common
           ln -sfn "$GITHUB_WORKSPACE/KernelSU/kernel" drivers/kernelsu
           grep -q 'CONFIG_KSU' drivers/Kbuild || \
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Kbuild
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
             echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo "--- drivers/Kbuild ---"; tail -3 drivers/Kbuild
-          echo "--- drivers/Kconfig ---"; tail -3 drivers/Kconfig
+          tail -2 drivers/Kbuild
+          tail -2 drivers/Kconfig
 
-      - name: Configure kernel (goldfish_x86_64_defconfig + all builtin)
+      - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |
-          cd goldfish
-          make ARCH=x86_64 LLVM=1 goldfish_x86_64_defconfig
-          # Enable required builtin drivers (no modules)
+          set -euxo pipefail
+          cd common
+          cp "$GITHUB_WORKSPACE/stock.config" .config
+          # 精确复刻原版内核 release 字符串，保证 /lib/modules 里的模块 vermagic 匹配
+          scripts/config --set-str LOCALVERSION "-android12-9-00039-g62a5f8e3accf-ab7647044"
+          scripts/config --disable LOCALVERSION_AUTO
+          # KernelSU 内建（不用模块）
           scripts/config --enable KSU
-          scripts/config --enable KALLSYMS
-          scripts/config --enable KALLSYMS_ALL
-          scripts/config --enable MODULES
-          # Critical graphics/memory drivers for hwcomposer
-          scripts/config --enable DMABUF_HEAPS_SYSTEM
-          scripts/config --enable DRM_VIRTIO_GPU
-          scripts/config --enable VIRTIO_DMA_SHARED_BUFFER
-          scripts/config --enable GOLDFISH
-          scripts/config --enable GOLDFISH_PIPE
-          scripts/config --enable VIRTIO_BLK
-          scripts/config --enable VIRTIO_PCI
-          scripts/config --enable EXT4_FS
-          scripts/config --disable DEBUG_INFO || true
           make ARCH=x86_64 LLVM=1 olddefconfig
-          echo "=== key configs ==="
-          grep -E 'CONFIG_KSU|CONFIG_KALLSYMS_ALL|CONFIG_DMABUF_HEAPS_SYSTEM|CONFIG_DRM_VIRTIO_GPU|CONFIG_VIRTIO_DMA_SHARED_BUFFER|CONFIG_GOLDFISH|CONFIG_GOLDFISH_PIPE|CONFIG_VIRTIO_BLK' .config
+          rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
+          echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"
+          test "$rel" = "$EXPECTED_RELEASE"
+          grep -E '^CONFIG_KSU=|^CONFIG_LOCALVERSION=|^# CONFIG_LOCALVERSION_AUTO' .config
 
       - name: Build bzImage
-        id: buildbz
         run: |
-          cd goldfish
+          cd common
           set -o pipefail
-          make ARCH=x86_64 LLVM=1 -j$(nproc) bzImage 2>&1 | tee build.log
+          make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
           ls -lh arch/x86/boot/bzImage
 
       - name: Upload build log on failure
@@ -136,15 +87,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: |
-            goldfish/build.log
-            clone_diag.log
+          path: common/build.log
 
-      - name: Upload artifacts
+      - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: goldfish-ksu-kernel
+          name: kernel-ranchu-ksu
           path: |
-            goldfish/arch/x86/boot/bzImage
-            goldfish/.config
+            common/arch/x86/boot/bzImage
+            common/.config
           if-no-files-found: error

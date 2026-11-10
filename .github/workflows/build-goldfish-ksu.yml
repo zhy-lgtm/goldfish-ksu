@@ -33,14 +33,31 @@ jobs:
             bc bison flex libssl-dev libelf-dev dwarves rsync cpio kmod zstd \
             clang lld llvm python3 make git
 
-      - name: Clone goldfish kernel source (5.10.43) from googlesource
+      - name: Clone goldfish kernel source (5.10.43)
         run: |
-          # googlesource 官方源，分支 android12-5.10（对应 5.10.43-android12）
-          git clone --depth 1 --branch "android12-5.10" \
-            https://android.googlesource.com/kernel/goldfish goldfish
+          set -x
+          echo "===== 诊断：列出 googlesource goldfish 的 5.10 分支 ====="
+          (git ls-remote --heads https://android.googlesource.com/kernel/goldfish 2>&1 \
+            | grep -E 'refs/heads/(android12|android-5\.10|android12-5\.10)' | head -30) || true
+
+          ok=0
+          for src in \
+            "https://android.googlesource.com/kernel/goldfish" \
+            "https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/goldfish" \
+            "https://github.com/aosp-mirror/kernel_goldfish" ; do
+            for br in android12-5.10 android-5.10 android12-5.10-2022-08 android-5.10-lts ; do
+              echo "===== TRY src=$src branch=$br ====="
+              if timeout 300 git clone --depth 1 --branch "$br" "$src" goldfish ; then
+                echo "===== SUCCESS $src @ $br ====="
+                ok=1; break 2
+              fi
+              rm -rf goldfish
+            done
+          done
+          if [ "$ok" != "1" ]; then echo "ALL CLONE ATTEMPTS FAILED"; exit 1; fi
           cd goldfish
           echo "Commit: $(git rev-parse HEAD)"
-          echo "Version: $(cat Makefile | grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' | awk '{print $3}' | tr '\n' '.' | sed 's/\.$//')"
+          grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | head -3
 
       - name: Clone KernelSU (compatible with 5.10)
         run: |

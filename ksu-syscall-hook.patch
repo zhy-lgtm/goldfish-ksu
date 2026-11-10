@@ -1,0 +1,168 @@
+diff --git a/kernel/hook/x86_64/syscall_hook.c b/kernel/hook/x86_64/syscall_hook.c
+index 1601efe6..7c8b8e75 100644
+--- a/kernel/hook/x86_64/syscall_hook.c
++++ b/kernel/hook/x86_64/syscall_hook.c
+@@ -5,6 +5,7 @@
+ #include <linux/kallsyms.h>
+ #include <linux/mutex.h>
+ #include <linux/nospec.h>
++#include <linux/version.h>
+ #include <asm/cacheflush.h>
+ #include "infra/symbol_resolver.h"
+ #include "../patch_memory.h"
+@@ -215,46 +216,26 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
+     return ksu_syscall_table[nr](regs);
+ }
+ 
+-// avd 13-5.15 missing this commit:
+-// https://github.com/torvalds/linux/commit/fb13b11d53875e28e7fbf0c26b288e4ea676aa9f
+-// we need to patch the whole do_syscall_64
++/*
++ * 5.10 上 do_syscall_64 的入口只做：
++ *     movq	%rdi, %rax        (48 89 f8)
++ *     xchgl	%eax, %ebx        (93)            <- 序号存到 ax，orig_ax 存到 ebx
++ *     call	syscall_enter_from_user_mode   (e8 xx xx xx xx)
++ * 我们只替换前 8 字节，跳进下面的汇编跳板：
++ *   1) 在 .entry.text 里原样执行被拿走的两条指令（此时寄存器/栈与内核入口完全一致，
++ *      抢占、调试异常、页错误都用内核自己的 fixup 处理，不会像 C 函数那样崩）；
++ *   2) 再 jmp 进原来的 syscall_enter_from_user_mode，后续流程与原生完全一致。
++ * sys_call_table 里被 KSU 挂钩的项自然生效，无需改动 do_syscall_64 的后续逻辑。
++ */
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+ static void *do_syscall_64_patch_addr;
+-static char do_syscall_64_orig_insn[14];
++// 入口前 5 字节：48 89 f8 93 e8，被 call rel32 覆盖的 3 字节追加在后
++static char do_syscall_64_orig_insn[8];
+ 
+-static long (*syscall_enter_from_user_mode_fn)(struct pt_regs *regs, long syscall);
+-static void (*syscall_exit_to_user_mode_fn)(struct pt_regs *regs);
++static unsigned long syscall_enter_rel32;
+ 
+-static __always_inline bool my_do_syscall_x64(struct pt_regs *regs, int nr)
+-{
+-    /*
+-	 * Convert negative numbers to very high and thus out of range
+-	 * numbers for comparisons.
+-	 */
+-    unsigned int unr = nr;
+-
+-    if (likely(unr < NR_syscalls)) {
+-        unr = array_index_nospec(unr, NR_syscalls);
+-        regs->ax = ksu_syscall_table[unr](regs);
+-        return true;
+-    }
+-    return false;
+-}
+-
+-static void __nocfi my_do_syscall_64(struct pt_regs *regs, int nr)
+-{
+-    nr = syscall_enter_from_user_mode_fn(regs, nr);
+-    nr = syscall_get_nr(current, regs);
+-
+-    // AVD doesn't have x32 support after A13, we can ignore do_syscall_x32
+-
+-    if (!my_do_syscall_x64(regs, nr) && nr != -1) {
+-        /* Invalid system call, but still a system call. */
+-        regs->ax = -ENOSYS;
+-    }
+-
+-    syscall_exit_to_user_mode_fn(regs);
+-}
++extern char ksu_entry_trampoline[];
++extern char ksu_entry_trampoline_end[];
+ #endif
+ #endif
+ 
+@@ -292,6 +273,63 @@ static void patch_abs_jump(const char *sym, void **patch_addr, void *target, cha
+     }
+ }
+ 
++#if defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
++/*
++ * 放在 .entry.text 里的跳板：内核 syscall 入口所有代码都在这个段，
++ * 这里发生的任何异常/抢占都由内核自己的入口栈与 fixup 处理。
++ * eax 里保留着系统调用号（原生 do_syscall_64 的约定）。
++ */
++asm(".pushsection .entry.text, \"ax\"\n"
++    ".global ksu_entry_trampoline\n"
++    "ksu_entry_trampoline:\n"
++    "   movq %rdi, %rax\n"
++    "   xchgl %eax, %ebx\n"
++    "   jmp *syscall_enter_rel32(%rip)\n"
++    ".global ksu_entry_trampoline_end\n"
++    "ksu_entry_trampoline_end:\n"
++    ".popsection\n");
++
++// 用入口跳板替换 do_syscall_64 的前 8 字节，同时校验入口指令是否与预期一致
++static void patch_do_syscall_64_entry(void)
++{
++    static const char expect[] = {
++        // movq %rdi, %rax ; xchgl %eax, %ebx ; call
++        0x48, 0x89, 0xf8, 0x93, 0xe8
++    };
++    char orig[8];
++    unsigned long enter;
++
++    do_syscall_64_patch_addr = (void *)find_kernel_symbol_exact("do_syscall_64");
++    enter = find_kernel_symbol_exact("syscall_enter_from_user_mode");
++    pr_info("do_syscall_64=0x%lx, syscall_enter_from_user_mode=0x%lx\n", (unsigned long)do_syscall_64_patch_addr,
++            enter);
++    if (!do_syscall_64_patch_addr || !enter)
++        return;
++
++    memcpy(orig, do_syscall_64_patch_addr, sizeof(orig));
++    if (memcmp(orig, expect, sizeof(expect)) != 0) {
++        pr_err("do_syscall_64 entry mismatch: %02x %02x %02x %02x %02x\n", (unsigned char)orig[0],
++               (unsigned char)orig[1], (unsigned char)orig[2], (unsigned char)orig[3], (unsigned char)orig[4]);
++        do_syscall_64_patch_addr = NULL;
++        return;
++    }
++
++    // 跳板尾部 jmp 的 rel32 = 目标 - 下一条指令地址
++    syscall_enter_rel32 = enter - ((unsigned long)ksu_entry_trampoline_end - 4);
++
++    // 备份：前 5 字节追加被覆盖掉的 call 剩余 3 字节
++    memcpy(do_syscall_64_orig_insn, orig, 5);
++    memcpy(do_syscall_64_orig_insn + 5, orig + 5, 3);
++
++    if (ksu_patch_text(do_syscall_64_patch_addr, ksu_entry_trampoline, 8, KSU_PATCH_TEXT_FLUSH_ICACHE)) {
++        pr_err("patch do_syscall_64 entry failed\n");
++        do_syscall_64_patch_addr = NULL;
++        return;
++    }
++    pr_info("do_syscall_64 entry patched -> trampoline\n");
++}
++#endif
++
+ void __init __nocfi ksu_syscall_hook_init(void)
+ {
+     int ni_slot;
+@@ -307,13 +345,7 @@ void __init __nocfi ksu_syscall_hook_init(void)
+ #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
+     patch_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, my_x64_sys_call, x64_sys_call_patch_orig_insn);
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+-    syscall_enter_from_user_mode_fn = find_kernel_symbol_exact("syscall_enter_from_user_mode");
+-    syscall_exit_to_user_mode_fn = find_kernel_symbol_exact("syscall_exit_to_user_mode");
+-    pr_info("syscall_enter_from_user_mode: 0x%lx, syscall_exit_to_user_mode: 0x%lx\n",
+-            (unsigned long)syscall_enter_from_user_mode_fn, (unsigned long)syscall_exit_to_user_mode_fn);
+-    if (syscall_enter_from_user_mode_fn && syscall_exit_to_user_mode_fn) {
+-        patch_abs_jump("do_syscall_64", &do_syscall_64_patch_addr, my_do_syscall_64, do_syscall_64_orig_insn);
+-    }
++    patch_do_syscall_64_entry();
+ #endif
+ #endif
+ 
+@@ -344,10 +376,11 @@ void __exit ksu_syscall_hook_exit(void)
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+     if (do_syscall_64_patch_addr) {
+-        ret = ksu_patch_text((void *)do_syscall_64_patch_addr, do_syscall_64_orig_insn, sizeof(do_syscall_64_orig_insn),
++        // 只恢复了前 8 字节（原入口前 5 字节 + call 剩余 3 字节）
++        ret = ksu_patch_text((void *)do_syscall_64_patch_addr, do_syscall_64_orig_insn, 8,
+                              KSU_PATCH_TEXT_FLUSH_ICACHE);
+         if (ret) {
+-            pr_err("restore x64_sys_call err: %d\n", ret);
++            pr_err("restore do_syscall_64 err: %d\n", ret);
+         }
+     }
+ #endif

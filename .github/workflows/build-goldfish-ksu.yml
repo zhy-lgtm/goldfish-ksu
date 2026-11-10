@@ -36,28 +36,48 @@ jobs:
       - name: Clone goldfish kernel source (5.10.43)
         run: |
           set -x
-          echo "===== 诊断：列出 googlesource goldfish 的 5.10 分支 ====="
-          (git ls-remote --heads https://android.googlesource.com/kernel/goldfish 2>&1 \
-            | grep -E 'refs/heads/(android12|android-5\.10|android12-5\.10)' | head -30) || true
+          cd "$GITHUB_WORKSPACE"
+          : > /tmp/clone_diag.log
+          log(){ echo "$*" | tee -a /tmp/clone_diag.log; }
 
+          # 尝试1: googlesource tarball 直下（避免 git clone 网络问题）
+          log "===== 尝试1: googlesource tarball ====="
+          if timeout 600 curl -fL --retry 2 -o goldfish-src.tar.gz \
+              "https://android.googlesource.com/kernel/goldfish/+archive/refs/heads/android12-5.10.tar.gz" ; then
+            log "tarball size: $(stat -c%s goldfish-src.tar.gz)"
+            mkdir goldfish && tar -xzf goldfish-src.tar.gz -C goldfish && \
+              log "===== SUCCESS: googlesource tarball ====="
+            cd goldfish
+            echo "Commit: $( ([ -f .git ] || [ -d .git ] ) && git rev-parse HEAD 2>/dev/null || echo tarball-no-git)"
+            grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | head -3
+            exit 0
+          else
+            log "googlesource tarball FAILED rc=$?"
+          fi
+
+          # 尝试2: git clone 各镜像+分支
           ok=0
           for src in \
             "https://android.googlesource.com/kernel/goldfish" \
             "https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/goldfish" \
-            "https://github.com/aosp-mirror/kernel_goldfish" ; do
-            for br in android12-5.10 android-5.10 android12-5.10-2022-08 android-5.10-lts ; do
-              echo "===== TRY src=$src branch=$br ====="
-              if timeout 300 git clone --depth 1 --branch "$br" "$src" goldfish ; then
-                echo "===== SUCCESS $src @ $br ====="
+            "https://gitclone.com/github.com/aosp-mirror/kernel_goldfish" \
+            "https://github.com/aosp-mirror/kernel_goldfish.git" ; do
+            for br in android12-5.10 android-5.10 android12-5.10-2022-08 ; do
+              log "===== TRY src=$src branch=$br ====="
+              if timeout 300 git clone --depth 1 --branch "$br" "$src" goldfish 2>>/tmp/clone_diag.log ; then
+                log "===== SUCCESS $src @ $br ====="
                 ok=1; break 2
               fi
+              log "clone failed (see above)"
               rm -rf goldfish
             done
           done
-          if [ "$ok" != "1" ]; then echo "ALL CLONE ATTEMPTS FAILED"; exit 1; fi
-          cd goldfish
-          echo "Commit: $(git rev-parse HEAD)"
-          grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | head -3
+          if [ "$ok" != "1" ]; then
+            echo "===== CLONE DIAG =====" >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/clone_diag.log >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/clone_diag.log "$GITHUB_WORKSPACE/clone_diag.log"
+            echo "ALL CLONE ATTEMPTS FAILED"; exit 1
+          fi
 
       - name: Clone KernelSU (compatible with 5.10)
         run: |
@@ -116,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: goldfish/build.log
+          path: |
+            goldfish/build.log
+            clone_diag.log
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

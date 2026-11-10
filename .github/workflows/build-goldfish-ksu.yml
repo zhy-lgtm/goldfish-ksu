@@ -6,7 +6,7 @@ on:
       ksu_ref:
         description: "KernelSU tag / branch"
         required: true
-        default: "v3.3.1"
+        default: "v0.9.5"
   push:
     branches: [ main ]
     paths:
@@ -86,11 +86,38 @@ jobs:
           scripts/config --disable WERROR
           # KernelSU 内建（不用模块）
           scripts/config --enable KSU
+          # ===== 关键驱动全部内建：绕开 ramdisk 模块的 CRC 不匹配问题 =====
+          # 存储（第一阶段的根，必须先内建）
+          scripts/config --enable VIRTIO_PCI
+          scripts/config --enable VIRTIO_PCI_LEGACY
+          scripts/config --enable VIRTIO_BLK
+          # adb/qemud 管道 + 图形同步（goldfish 平台）
+          scripts/config --enable GOLDFISH
+          scripts/config --enable GOLDFISH_PIPE
+          scripts/config --enable GOLDFISH_SYNC
+          scripts/config --enable GOLDFISH_ADDRESS_SPACE
+          scripts/config --enable GOLDFISH_BATTERY
+          # 显示
+          scripts/config --enable DRM
+          scripts/config --enable DRM_VIRTIO_GPU
+          scripts/config --enable VIRTIO_DMA_SHARED_BUFFER
+          scripts/config --enable DMABUF_HEAPS
+          scripts/config --enable DMABUF_HEAPS_SYSTEM
+          # 输入/网络/杂项
+          scripts/config --enable VIRTIO_INPUT
+          scripts/config --enable VIRTIO_NET
+          scripts/config --enable VIRTIO_CONSOLE
+          scripts/config --enable VIRTIO_BALLOON
+          scripts/config --enable VIRTIO_MEM
+          scripts/config --enable HW_RANDOM_VIRTIO
+          scripts/config --enable ZSMALLOC
+          scripts/config --enable ZRAM
+          scripts/config --enable MOUSE_PS2
           make ARCH=x86_64 LLVM=1 olddefconfig
           rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
           echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"
           test "$rel" = "$EXPECTED_RELEASE"
-          grep -E '^CONFIG_KSU=|^CONFIG_LOCALVERSION=|^# CONFIG_LOCALVERSION_AUTO' .config
+          grep -E '^CONFIG_KSU=|^CONFIG_LOCALVERSION=|^CONFIG_VIRTIO_BLK=|^CONFIG_VIRTIO_PCI=|^CONFIG_GOLDFISH=|^CONFIG_GOLDFISH_PIPE=|^CONFIG_DRM_VIRTIO_GPU=|^CONFIG_DMABUF_HEAPS_SYSTEM=|^CONFIG_VIRTIO_INPUT=|^CONFIG_VIRTIO_NET=' .config
 
       - name: Build bzImage
         run: |
@@ -110,6 +137,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-ranchu-ksu
+          include-hidden-files: true
           path: |
             /tmp/ksu/common/arch/x86/boot/bzImage
             /tmp/ksu/common/.config

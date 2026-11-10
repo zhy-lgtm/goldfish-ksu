@@ -66,6 +66,14 @@ jobs:
           tail -2 "$kb"
           tail -2 drivers/Kconfig
 
+      - name: Neutralize -Werror (clang-14 vs old tree)
+        run: |
+          cd "$BUILD_DIR/common"
+          # CONFIG_KVM_WERROR=y 会给 kvm 单独加 -Werror，Kconfig default y 关不掉，直接改 flag
+          sed -i 's/-Werror/-Wno-error/g' arch/x86/kvm/Makefile
+          sed -i 's/-Werror\b/-Wno-error/g' Makefile scripts/Makefile.extrawarn 2>/dev/null || true
+          grep -n -- '-Werror' arch/x86/kvm/Makefile Makefile scripts/Makefile.extrawarn || echo 'no -Werror left'
+
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |
           set -euxo pipefail

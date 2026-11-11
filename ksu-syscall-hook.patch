@@ -1,5 +1,5 @@
 diff --git a/kernel/hook/x86_64/syscall_hook.c b/kernel/hook/x86_64/syscall_hook.c
-index 1601efe6..7c8b8e75 100644
+index 1601efe6..42f074ec 100644
 --- a/kernel/hook/x86_64/syscall_hook.c
 +++ b/kernel/hook/x86_64/syscall_hook.c
 @@ -5,6 +5,7 @@
@@ -10,7 +10,7 @@ index 1601efe6..7c8b8e75 100644
  #include <asm/cacheflush.h>
  #include "infra/symbol_resolver.h"
  #include "../patch_memory.h"
-@@ -215,46 +216,26 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
+@@ -215,46 +216,27 @@ static long my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
      return ksu_syscall_table[nr](regs);
  }
  
@@ -36,7 +36,8 @@ index 1601efe6..7c8b8e75 100644
  
 -static long (*syscall_enter_from_user_mode_fn)(struct pt_regs *regs, long syscall);
 -static void (*syscall_exit_to_user_mode_fn)(struct pt_regs *regs);
-+static unsigned long syscall_enter_rel32;
++// 全局导出，给 .entry.text 里的汇编跳板引用
++unsigned long syscall_enter_rel32 __attribute__((used));
  
 -static __always_inline bool my_do_syscall_x64(struct pt_regs *regs, int nr)
 -{
@@ -73,7 +74,7 @@ index 1601efe6..7c8b8e75 100644
  #endif
  #endif
  
-@@ -292,6 +273,63 @@ static void patch_abs_jump(const char *sym, void **patch_addr, void *target, cha
+@@ -292,6 +274,63 @@ static void patch_abs_jump(const char *sym, void **patch_addr, void *target, cha
      }
  }
  
@@ -137,7 +138,7 @@ index 1601efe6..7c8b8e75 100644
  void __init __nocfi ksu_syscall_hook_init(void)
  {
      int ni_slot;
-@@ -307,13 +345,7 @@ void __init __nocfi ksu_syscall_hook_init(void)
+@@ -307,13 +346,7 @@ void __init __nocfi ksu_syscall_hook_init(void)
  #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
      patch_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, my_x64_sys_call, x64_sys_call_patch_orig_insn);
  #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
@@ -152,7 +153,7 @@ index 1601efe6..7c8b8e75 100644
  #endif
  #endif
  
-@@ -344,10 +376,11 @@ void __exit ksu_syscall_hook_exit(void)
+@@ -344,10 +377,11 @@ void __exit ksu_syscall_hook_exit(void)
  
  #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
      if (do_syscall_64_patch_addr) {

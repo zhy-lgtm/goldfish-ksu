@@ -125,13 +125,13 @@ jobs:
           # 模块全部加载失败 -> 没有 goldfish_pipe -> adb offline。
           # KernelSU 在 5.10 上靠 syscall table 的 dispatcher slot 生效，不依赖 do_syscall_64 入口补丁，
           # 所以也不需要为它关 LTO/CFI。
-          make ARCH=x86_64 LLVM=1 olddefconfig
+          make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
           # 硬断言：LTO/CFI 必须真的被开启，否则 struct module 布局变化 -> module_layout CRC 不匹配
           # -> ramdisk 里所有 .ko 报 "disagrees about version of symbol module_layout" -> adb offline
           grep -q '^CONFIG_LTO_CLANG_FULL=y' .config || { echo 'FATAL: LTO_CLANG_FULL was dropped'; grep -E 'CONFIG_LTO|CONFIG_LLD|CONFIG_HAS_LTO' .config; exit 1; }
           grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG was dropped'; grep -E 'CONFIG_CFI|CONFIG_LTO|CONFIG_LLD' .config; exit 1; }
           grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS off'; exit 1; }
-          rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
+          rel=$(make -s ARCH=x86_64 LLVM=1 LLVM_IAS=1 kernelrelease)
           echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"
           test "$rel" = "$EXPECTED_RELEASE"
           grep -E '^CONFIG_KSU=|^CONFIG_LOCALVERSION=|^CONFIG_VIRTIO_BLK=|^CONFIG_VIRTIO_PCI=|^CONFIG_GOLDFISH=|^CONFIG_GOLDFISH_PIPE=|^CONFIG_DRM_VIRTIO_GPU=|^CONFIG_DMABUF_HEAPS_SYSTEM=|^CONFIG_VIRTIO_INPUT=|^CONFIG_VIRTIO_NET=' .config
@@ -141,7 +141,7 @@ jobs:
           export PATH=/tmp/fakebin:$PATH
           cd "$BUILD_DIR/common"
           set -o pipefail
-          make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
+          make ARCH=x86_64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
           ls -lh arch/x86/boot/bzImage
 
       - name: Upload build log on failure

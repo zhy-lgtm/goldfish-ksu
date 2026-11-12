@@ -94,21 +94,18 @@ jobs:
           # 该选项在 5.10 上劫持 do_syscall_64；我们把 KSU 的入口钩子换成了 .entry.text 里的
           # 汇编跳板（patch 见 ksu-syscall-hook.patch），修掉原先裸 C 函数在入口中间执行导致的 panic。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
-          # ===== 重要：不再改动任何驱动配置 =====
-          # stock.config 里 VIRTIO_PCI/VIRTIO_BLK/GOLDFISH 等全是 not set，
-          # 原版 kernel-ranchu 用的是 goldfish 专用构建流程（kernel/google/goldfish）。
-          # 我之前把这些驱动全改成 =y，结果扰乱了设备枚举顺序 -> surfaceflinger 崩。
-          # 现在完全保留 stock.config 的驱动配置，只动 LTO/CFI 和 KSU。
-          # ===== 关闭 LTO/CFI：KernelSU 的 x86 syscall 钩子是运行时改机器码（patch_abs_jump），
-          # LTO 全量优化会合并/重排函数、CFI 会插检查桩，导致补丁跳错位置 -> init 首个 syscall panic
-          scripts/config --disable LTO_CLANG_FULL
-          scripts/config --disable LTO_CLANG_THIN
-          scripts/config --disable LTO_CLANG
-          scripts/config --disable LTO
-          scripts/config --enable LTO_NONE
-          scripts/config --disable CFI_CLANG
-          scripts/config --disable CFI_CLANG_SHADOW
-          scripts/config --disable CFI_PERMISSIVE
+          # ===== 驱动配置 =====
+          # 保持 stock.config 原样：所有驱动都不设 =y/not set，由 ramdisk 里的预编译 .ko 模块加载。
+          # 绝不能把 goldfish_pipe / virtio_* 改成内建 =y：内建版本在早期 probe 会失败
+          # （实测 goldfish_pipe_probe 返回 -EINVAL），且不会重试 -> adbd 用不了 -> adb 永远 offline。
+          # ===== LTO/CFI =====
+          # 必须保持 stock.config 原样（LTO_CLANG_FULL / CFI_CLANG 开启）。
+          # 原因：CONFIG_MODVERSIONS=y 时 ramdisk 的 .ko 要求 module_layout 的 CRC 与内核完全一致。
+          # 而 LTO/CFI 会改变 struct module 布局，一旦关掉，module_layout CRC 变化 ->
+          # 所有 .ko 报 "disagrees about version of symbol module_layout" -> Exec format error ->
+          # 模块全部加载失败 -> 没有 goldfish_pipe -> adb offline。
+          # KernelSU 在 5.10 上靠 syscall table 的 dispatcher slot 生效，不依赖 do_syscall_64 入口补丁，
+          # 所以也不需要为它关 LTO/CFI。
           make ARCH=x86_64 LLVM=1 olddefconfig
           rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
           echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"

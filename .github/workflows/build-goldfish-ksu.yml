@@ -70,6 +70,24 @@ jobs:
           tail -2 "$kb"
           tail -2 drivers/Kconfig
 
+      - name: Fix LLVM toolchain version detection (so LTO/CFI are not dropped)
+        run: |
+          # 5.10 的 arch/Kconfig 用 `--version | grep -q llvm-ar / llvm-nm / LLD` 探测工具链。
+          # Ubuntu 的 llvm-ar/llvm-nm 输出 "Ubuntu LLVM version 14.0.0"，不含 "llvm-ar"/"llvm-nm"，
+          # ld.lld 输出 "Ubuntu LLD 14.0.0" 让 LLD_VERSION 变成 00000。
+          # 探测失败 -> CONFIG_HAS_LTO_CLANG=n -> LTO_CLANG_FULL 与 CFI_CLANG 被静默丢弃。
+          # CFI 一旦丢失，struct module 少了 cfi 字段，module_layout 的 CRC 变化，
+          # ramdisk 里所有预编译 .ko 都会报 "disagrees about version of symbol module_layout"。
+          mkdir -p /tmp/fakebin
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "llvm-ar version 14.0.0"; exit 0; fi\nexec /usr/bin/llvm-ar "$@"\n' > /tmp/fakebin/llvm-ar
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "llvm-nm version 14.0.0"; exit 0; fi\nexec /usr/bin/llvm-nm "$@"\n' > /tmp/fakebin/llvm-nm
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "LLD 14.0.0"; exit 0; fi\nexec /usr/bin/ld.lld "$@"\n' > /tmp/fakebin/ld.lld
+          chmod +x /tmp/fakebin/llvm-ar /tmp/fakebin/llvm-nm /tmp/fakebin/ld.lld
+          export PATH=/tmp/fakebin:$PATH
+          echo "llvm-ar -> $(llvm-ar --version | head -1)"
+          echo "llvm-nm -> $(llvm-nm --version | head -1)"
+          echo "ld.lld  -> $(ld.lld --version | head -1)"
+
       - name: Neutralize -Werror (clang-14 vs old tree)
         run: |
           cd "$BUILD_DIR/common"
@@ -81,6 +99,7 @@ jobs:
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |
           set -euxo pipefail
+          export PATH=/tmp/fakebin:$PATH
           cd "$BUILD_DIR/common"
           cp "$GITHUB_WORKSPACE/stock.config" .config
           # 精确复刻原版内核 release 字符串，保证 /lib/modules 里的模块 vermagic 匹配
@@ -107,6 +126,11 @@ jobs:
           # KernelSU 在 5.10 上靠 syscall table 的 dispatcher slot 生效，不依赖 do_syscall_64 入口补丁，
           # 所以也不需要为它关 LTO/CFI。
           make ARCH=x86_64 LLVM=1 olddefconfig
+          # 硬断言：LTO/CFI 必须真的被开启，否则 struct module 布局变化 -> module_layout CRC 不匹配
+          # -> ramdisk 里所有 .ko 报 "disagrees about version of symbol module_layout" -> adb offline
+          grep -q '^CONFIG_LTO_CLANG_FULL=y' .config || { echo 'FATAL: LTO_CLANG_FULL was dropped'; grep -E 'CONFIG_LTO|CONFIG_LLD|CONFIG_HAS_LTO' .config; exit 1; }
+          grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG was dropped'; grep -E 'CONFIG_CFI|CONFIG_LTO|CONFIG_LLD' .config; exit 1; }
+          grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS off'; exit 1; }
           rel=$(make -s ARCH=x86_64 LLVM=1 kernelrelease)
           echo "kernelrelease = $rel (expect $EXPECTED_RELEASE)"
           test "$rel" = "$EXPECTED_RELEASE"
@@ -114,6 +138,7 @@ jobs:
 
       - name: Build bzImage
         run: |
+          export PATH=/tmp/fakebin:$PATH
           cd "$BUILD_DIR/common"
           set -o pipefail
           make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log

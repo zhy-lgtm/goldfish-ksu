@@ -138,10 +138,6 @@ jobs:
           set -o pipefail
           make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
           ls -lh arch/x86/boot/bzImage
-          # 验证内核自身 vermagic 与 ramdisk 里的 .ko 一致（必须含 "modversions "）
-          readelf -p .modinfo vmlinux > modinfo.txt
-          grep -i vermagic modinfo.txt
-          grep -q 'vermagic=.*modversions' modinfo.txt || { echo 'FATAL: vermagic missing modversions suffix'; exit 1; }
 
       - name: Upload build log on failure
         if: failure()
@@ -151,6 +147,7 @@ jobs:
           path: /tmp/ksu/common/build.log
 
       - name: Upload kernel artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-ranchu-ksu

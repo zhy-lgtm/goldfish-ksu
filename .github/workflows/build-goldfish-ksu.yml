@@ -70,6 +70,30 @@ jobs:
           tail -2 "$kb"
           tail -2 drivers/Kconfig
 
+      - name: Inject CFI slowpath stub (so prebuilt CFI-compiled ramdisk .ko can load)
+        run: |
+          set -euxo pipefail
+          # 原版 kernel-ranchu 的 ramdisk .ko 是用 CFI 编译的，引用 __cfi_slowpath / __cfi_slowpath_diag。
+          # 我们关掉了 CFI，内核不再提供这两个符号，模块 insmod 会报 "Unknown symbol __cfi_slowpath"。
+          # 在内核里补空实现并导出：模块能正常加载，CFI 检查退化为 no-op（模拟器场景无影响）。
+          F="$BUILD_DIR/KernelSU/kernel/infra/symbol_resolver.c"
+          cat >> "$F" <<'EOF'
+
+/*
+ * CFI slowpath stubs. The factory ramdisk *.ko were compiled with
+ * CONFIG_CFI_CLANG and reference __cfi_slowpath / __cfi_slowpath_diag.
+ * Our kernel builds with CFI disabled, so export no-op implementations to
+ * allow those modules to still load. CFI checks become no-ops, which is
+ * acceptable for the emulator image.
+ */
+void __cfi_slowpath(unsigned long typeid, void *ptr) { }
+EXPORT_SYMBOL(__cfi_slowpath);
+
+void __cfi_slowpath_diag(unsigned long typeid, void *ptr, void *diag) { }
+EXPORT_SYMBOL(__cfi_slowpath_diag);
+EOF
+          tail -12 "$F"
+
       - name: Fix LLVM toolchain version detection (so LTO/CFI are not dropped)
         run: |
           # 5.10 的 arch/Kconfig 用 `--version | grep -q llvm-ar / llvm-nm / LLD` 探测工具链。
@@ -112,20 +136,31 @@ jobs:
           scripts/config --enable KSU
           # 原版 5.10 没打 indirect syscall 补丁，必须开启运行时补丁分发器。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
-          # ===== LTO/CFI/MODVERSIONS 必须全部保持 stock.config 原样（改用 ThinLTO）=====
-          # ramdisk 里的预编译 .ko 是原版内核用 clang Full LTO + CFI + MODVERSIONS 编译的：
-          #   - 引用 __cfi_slowpath（CFI 提供），关 CFI 会 "Unknown symbol __cfi_slowpath"
-          #   - 带 module_layout 的 CRC（MODVERSIONS 校验），改 struct module 布局会不匹配
-          # CRC 只由类型签名决定，与 LTO 类型无关，所以 ThinLTO 与 Full LTO 对 .ko 兼容性等效。
-          # 但 Full LTO 在 16G runner 上链接 vmlinux 时易被 OOM killer 杀掉（实测多次中断），
-          # 改 ThinLTO 内存/耗时都低得多，编译稳定。
+          # ===== LTO/CFI/MODVERSIONS：必须全部关闭 =====
+          # 实测两组对照：
+          #  A) CFI 开 -> ramdisk .ko 能加载，但 sys_call_table 的槽指向 CFI 跳板，
+          #     KernelSU 找不到 sys_ni_syscall 空槽（"failed to find ni_syscall slot for dispatcher"），
+          #     manager 无法与内核通信 -> 显示"未安装"。
+          #  B) CFI 关 -> dispatcher installed at slot 134（manager 正常），
+          #     但原版 CFI 编译的 .ko 引用 __cfi_slowpath，内核没有该符号 -> 模块加载失败。
+          # 解法：选 B（关 CFI/LTO），并在内核里补 __cfi_slowpath 空实现导出（见下一步），
+          # 这样 .ko 能 insmod（CFI 检查退化为 no-op，模拟器场景无影响），KSU 通信也正常。
+          # MODVERSIONS 必须同时关：关 CFI 改变了 struct module 布局，module_layout 的 CRC 会变，
+          # 开着 MODVERSIONS 会导致所有 .ko 报 "disagrees about version of symbol module_layout"。
           scripts/config --disable LTO_CLANG_FULL
-          scripts/config --enable LTO_CLANG_THIN
+          scripts/config --disable LTO_CLANG_THIN
+          scripts/config --disable LTO_CLANG
+          scripts/config --disable LTO
+          scripts/config --enable LTO_NONE
+          scripts/config --disable CFI_CLANG
+          scripts/config --disable CFI_CLANG_SHADOW
+          scripts/config --disable CFI_PERMISSIVE
+          scripts/config --disable MODVERSIONS
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
-          # 硬断言：LTO/CFI/MODVERSIONS 必须真的被开启，否则 ramdisk .ko 无法加载
-          grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo 'FATAL: LTO_CLANG_THIN dropped'; grep -E 'CONFIG_LTO|CONFIG_HAS_LTO|CONFIG_LLD' .config; exit 1; }
-          grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG dropped'; grep -E 'CONFIG_CFI|CONFIG_LTO|CONFIG_LLD' .config; exit 1; }
-          grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS dropped'; grep -E 'CONFIG_MODVERSIONS|CONFIG_LTO' .config; exit 1; }
+          # 断言：CFI/LTO/MODVERSIONS 必须关闭，KSU 必须开启
+          grep -q '^CONFIG_LTO_NONE=y' .config || { echo 'FATAL: LTO not none'; grep -E 'CONFIG_LTO' .config; exit 1; }
+          grep -q '^# CONFIG_CFI_CLANG is not set' .config || { echo 'FATAL: CFI_CLANG still on'; grep -E 'CONFIG_CFI' .config; exit 1; }
+          grep -q '^# CONFIG_MODVERSIONS is not set' .config || { echo 'FATAL: MODVERSIONS still on'; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }
           grep -q '^# CONFIG_GOLDFISH is not set' .config || { echo 'FATAL: GOLDFISH must stay modular (not set)'; exit 1; }
           rel=$(make -s ARCH=x86_64 LLVM=1 LLVM_IAS=1 kernelrelease)

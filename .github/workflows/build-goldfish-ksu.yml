@@ -76,23 +76,25 @@ jobs:
           # 原版 kernel-ranchu 的 ramdisk .ko 是用 CFI 编译的，引用 __cfi_slowpath / __cfi_slowpath_diag。
           # 我们关掉了 CFI，内核不再提供这两个符号，模块 insmod 会报 "Unknown symbol __cfi_slowpath"。
           # 在内核里补空实现并导出：模块能正常加载，CFI 检查退化为 no-op（模拟器场景无影响）。
+          # 注意：这里必须用 printf 逐行追加，不能用 heredoc——heredoc 结束符要顶格，
+          # 而 YAML 块标量要求所有行保持相同缩进，两者冲突会导致 workflow 解析失败。
           F="$BUILD_DIR/KernelSU/kernel/infra/symbol_resolver.c"
-          cat >> "$F" <<'EOF'
-
-/*
- * CFI slowpath stubs. The factory ramdisk *.ko were compiled with
- * CONFIG_CFI_CLANG and reference __cfi_slowpath / __cfi_slowpath_diag.
- * Our kernel builds with CFI disabled, so export no-op implementations to
- * allow those modules to still load. CFI checks become no-ops, which is
- * acceptable for the emulator image.
- */
-void __cfi_slowpath(unsigned long typeid, void *ptr) { }
-EXPORT_SYMBOL(__cfi_slowpath);
-
-void __cfi_slowpath_diag(unsigned long typeid, void *ptr, void *diag) { }
-EXPORT_SYMBOL(__cfi_slowpath_diag);
-EOF
-          tail -12 "$F"
+          printf '%s\n' \
+            '' \
+            '/*' \
+            ' * CFI slowpath stubs. The factory ramdisk *.ko were compiled with' \
+            ' * CONFIG_CFI_CLANG and reference __cfi_slowpath / __cfi_slowpath_diag.' \
+            ' * Our kernel builds with CFI disabled, so export no-op implementations to' \
+            ' * allow those modules to still load. CFI checks become no-ops, acceptable' \
+            ' * for the emulator image.' \
+            ' */' \
+            'void __cfi_slowpath(unsigned long typeid, void *ptr) { }' \
+            'EXPORT_SYMBOL(__cfi_slowpath);' \
+            '' \
+            'void __cfi_slowpath_diag(unsigned long typeid, void *ptr, void *diag) { }' \
+            'EXPORT_SYMBOL(__cfi_slowpath_diag);' \
+            >> "$F"
+          tail -14 "$F"
 
       - name: Fix LLVM toolchain version detection (so LTO/CFI are not dropped)
         run: |

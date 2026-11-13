@@ -92,6 +92,11 @@ jobs:
           sed -i 's/-Werror/-Wno-error/g' arch/x86/kvm/Makefile
           sed -i 's/-Werror\b/-Wno-error/g' Makefile scripts/Makefile.extrawarn 2>/dev/null || true
           grep -n -- '-Werror' arch/x86/kvm/Makefile Makefile scripts/Makefile.extrawarn || echo 'no -Werror left'
+          # 5.10 在 CONFIG_LTO_CLANG 时给 LTO 链接传 -plugin-opt=-stack-alignment=8，
+          # 这个插件参数在 clang/lld 14 已被移除（报 "ld.lld: Unknown command line argument"）。
+          # 编译阶段的 -mstack-alignment=8 仍然有效且生效，LTO 链接不需要显式传该值，直接删掉这一行。
+          sed -i '/plugin-opt=-stack-alignment/d' arch/x86/Makefile
+          sed -n '195,210p' arch/x86/Makefile
 
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |

@@ -70,18 +70,20 @@ jobs:
           tail -2 "$kb"
           tail -2 drivers/Kconfig
 
-      - name: Patch vermagic so prebuilt ramdisk .ko modules still load
+      - name: Fix LLVM toolchain version detection (so LTO/CFI are not dropped)
         run: |
-          set -euxo pipefail
-          cd "$BUILD_DIR/common"
-          # 关键思路：CONFIG_MODVERSIONS=n 时内核对 .ko 完全不校验符号 CRC，
-          # 只剩下 check_modinfo() 的 vermagic 字符串比较。
-          # 而 ramdisk 里 53 个预编译 .ko 的 vermagic 尾部带 "modversions "，
-          # 这个后缀由 include/linux/vermagic.h 的 MODULE_VERMAGIC_MODVERSIONS 提供。
-          # 我们把该宏固定输出 "modversions "，于是即使内核自身没开 MODVERSIONS，
-          # vermagic 仍与原版完全一致，模块可正常加载（不再需要匹配 module_layout CRC）。
-          sed -i 's|#define MODULE_VERMAGIC_MODVERSIONS ""|#define MODULE_VERMAGIC_MODVERSIONS "modversions "|' include/linux/vermagic.h
-          grep -n 'MODULE_VERMAGIC_MODVERSIONS' include/linux/vermagic.h
+          # 5.10 的 arch/Kconfig 用 `--version | grep -q llvm-ar / llvm-nm / LLD` 探测工具链。
+          # Ubuntu 的 llvm-ar/llvm-nm 输出 "Ubuntu LLVM version 14.0.0"，不含 "llvm-ar"/"llvm-nm"，
+          # 导致 HAS_LTO_CLANG 的探测失败 -> LTO_CLANG_FULL / CFI_CLANG 被静默丢弃。
+          # 注意 make 还必须传 LLVM_IAS=1，否则 $(success,test $(LLVM_IAS) -eq 1) 为假，
+          # HAS_LTO_CLANG 同样为 n。
+          mkdir -p /tmp/fakebin
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "llvm-ar version 14.0.0"; exit 0; fi\nexec /usr/bin/llvm-ar "$@"\n' > /tmp/fakebin/llvm-ar
+          printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "llvm-nm version 14.0.0"; exit 0; fi\nexec /usr/bin/llvm-nm "$@"\n' > /tmp/fakebin/llvm-nm
+          chmod +x /tmp/fakebin/llvm-ar /tmp/fakebin/llvm-nm
+          export PATH=/tmp/fakebin:$PATH
+          echo "llvm-ar -> $(llvm-ar --version | head -1)"
+          echo "llvm-nm -> $(llvm-nm --version | head -1)"
 
       - name: Neutralize -Werror (clang-14 vs old tree)
         run: |
@@ -104,27 +106,19 @@ jobs:
           # KernelSU 内建（不用模块）
           scripts/config --enable KSU
           # 原版 5.10 没打 indirect syscall 补丁，必须开启运行时补丁分发器。
-          # 该选项在 5.10 上劫持 do_syscall_64；我们把 KSU 的入口钩子换成了 .entry.text 里的
-          # 汇编跳板（patch 见 ksu-syscall-hook.patch），修掉原先裸 C 函数在入口中间执行导致的 panic。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
-          # ===== 模块版本校验 =====
-          # 关掉 MODVERSIONS，内核对 .ko 不再校验符号 CRC（vernagic 已由上一步补上 "modversions "）。
-          # 这样就不必让内核与 ramdisk 里预编译 .ko 的 module_layout CRC 完全一致。
-          scripts/config --disable MODVERSIONS
-          # ===== LTO/CFI =====
-          # 一并关掉：既然不再需要 CRC 匹配，LTO/CFI 对模块兼容性没有意义，
-          # 而且 Full LTO 链接在 16G runner 上有 OOM 风险、耗时也长。
-          scripts/config --disable LTO_CLANG_FULL
-          scripts/config --disable LTO_CLANG_THIN
-          scripts/config --disable LTO_CLANG
-          scripts/config --disable LTO
-          scripts/config --enable LTO_NONE
-          scripts/config --disable CFI_CLANG
-          scripts/config --disable CFI_CLANG_SHADOW
+          # ===== 关键：LTO/CFI/MODVERSIONS 必须全部保持 stock.config 原样 =====
+          # ramdisk 里的预编译 .ko 是原版内核用 clang 的 Full LTO + CFI + MODVERSIONS 编译出来的：
+          #   - 它们引用 __cfi_slowpath 符号（CFI 提供），关 CFI 会 "Unknown symbol __cfi_slowpath"
+          #   - 它们带 module_layout 的 CRC（MODVERSIONS 校验），关 MODVERSIONS/改 struct module 布局会不匹配
+          # 因此必须用完全相同的 LTO_CLANG_FULL + CFI_CLANG + MODVERSIONS 编译，
+          # 才能让这些 .ko 正常加载 -> goldfish_pipe/virtio 起来 -> 分区可枚举 -> 系统可开机。
+          # 前提：make 必须传 LLVM_IAS=1，否则 HAS_LTO_CLANG=n -> LTO/CFI 被静默丢弃。
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
-          # 断言：MODVERSIONS 必须关闭（否则又要 CRC 匹配）
-          grep -q '^# CONFIG_MODVERSIONS is not set' .config || { echo 'FATAL: MODVERSIONS still on'; exit 1; }
-          grep -q '^CONFIG_MODULES=y' .config || { echo 'FATAL: MODULES off'; exit 1; }
+          # 硬断言：LTO/CFI/MODVERSIONS 必须真的被开启，否则 ramdisk .ko 无法加载
+          grep -q '^CONFIG_LTO_CLANG_FULL=y' .config || { echo 'FATAL: LTO_CLANG_FULL dropped'; grep -E 'CONFIG_LTO|CONFIG_HAS_LTO|CONFIG_LLD' .config; exit 1; }
+          grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG dropped'; grep -E 'CONFIG_CFI|CONFIG_LTO|CONFIG_LLD' .config; exit 1; }
+          grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS dropped'; grep -E 'CONFIG_MODVERSIONS|CONFIG_LTO' .config; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }
           grep -q '^# CONFIG_GOLDFISH is not set' .config || { echo 'FATAL: GOLDFISH must stay modular (not set)'; exit 1; }
           rel=$(make -s ARCH=x86_64 LLVM=1 LLVM_IAS=1 kernelrelease)
@@ -136,7 +130,7 @@ jobs:
         run: |
           cd "$BUILD_DIR/common"
           set -o pipefail
-          make ARCH=x86_64 LLVM=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
+          make ARCH=x86_64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" bzImage 2>&1 | tee build.log
           ls -lh arch/x86/boot/bzImage
 
       - name: Upload build log on failure

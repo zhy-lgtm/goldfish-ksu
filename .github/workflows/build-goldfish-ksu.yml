@@ -112,16 +112,18 @@ jobs:
           scripts/config --enable KSU
           # 原版 5.10 没打 indirect syscall 补丁，必须开启运行时补丁分发器。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
-          # ===== 关键：LTO/CFI/MODVERSIONS 必须全部保持 stock.config 原样 =====
-          # ramdisk 里的预编译 .ko 是原版内核用 clang 的 Full LTO + CFI + MODVERSIONS 编译出来的：
-          #   - 它们引用 __cfi_slowpath 符号（CFI 提供），关 CFI 会 "Unknown symbol __cfi_slowpath"
-          #   - 它们带 module_layout 的 CRC（MODVERSIONS 校验），关 MODVERSIONS/改 struct module 布局会不匹配
-          # 因此必须用完全相同的 LTO_CLANG_FULL + CFI_CLANG + MODVERSIONS 编译，
-          # 才能让这些 .ko 正常加载 -> goldfish_pipe/virtio 起来 -> 分区可枚举 -> 系统可开机。
-          # 前提：make 必须传 LLVM_IAS=1，否则 HAS_LTO_CLANG=n -> LTO/CFI 被静默丢弃。
+          # ===== LTO/CFI/MODVERSIONS 必须全部保持 stock.config 原样（改用 ThinLTO）=====
+          # ramdisk 里的预编译 .ko 是原版内核用 clang Full LTO + CFI + MODVERSIONS 编译的：
+          #   - 引用 __cfi_slowpath（CFI 提供），关 CFI 会 "Unknown symbol __cfi_slowpath"
+          #   - 带 module_layout 的 CRC（MODVERSIONS 校验），改 struct module 布局会不匹配
+          # CRC 只由类型签名决定，与 LTO 类型无关，所以 ThinLTO 与 Full LTO 对 .ko 兼容性等效。
+          # 但 Full LTO 在 16G runner 上链接 vmlinux 时易被 OOM killer 杀掉（实测多次中断），
+          # 改 ThinLTO 内存/耗时都低得多，编译稳定。
+          scripts/config --disable LTO_CLANG_FULL
+          scripts/config --enable LTO_CLANG_THIN
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
           # 硬断言：LTO/CFI/MODVERSIONS 必须真的被开启，否则 ramdisk .ko 无法加载
-          grep -q '^CONFIG_LTO_CLANG_FULL=y' .config || { echo 'FATAL: LTO_CLANG_FULL dropped'; grep -E 'CONFIG_LTO|CONFIG_HAS_LTO|CONFIG_LLD' .config; exit 1; }
+          grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo 'FATAL: LTO_CLANG_THIN dropped'; grep -E 'CONFIG_LTO|CONFIG_HAS_LTO|CONFIG_LLD' .config; exit 1; }
           grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG dropped'; grep -E 'CONFIG_CFI|CONFIG_LTO|CONFIG_LLD' .config; exit 1; }
           grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS dropped'; grep -E 'CONFIG_MODVERSIONS|CONFIG_LTO' .config; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }

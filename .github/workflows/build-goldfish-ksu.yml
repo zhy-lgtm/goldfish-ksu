@@ -161,7 +161,9 @@ jobs:
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
           # 断言：CFI/LTO/MODVERSIONS 必须关闭，KSU 必须开启
           grep -q '^CONFIG_LTO_NONE=y' .config || { echo 'FATAL: LTO not none'; grep -E 'CONFIG_LTO' .config; exit 1; }
-          grep -q '^# CONFIG_CFI_CLANG is not set' .config || { echo 'FATAL: CFI_CLANG still on'; grep -E 'CONFIG_CFI' .config; exit 1; }
+          # CFI_CLANG 依赖 LTO_CLANG；关闭后 Kconfig 可能完全省略该项，而不是写 "is not set"。
+          # 因此只把显式 =y 视为失败，省略和 is not set 都代表已关闭。
+          if grep -q '^CONFIG_CFI_CLANG=y' .config; then echo 'FATAL: CFI_CLANG still on'; grep -E 'CONFIG_CFI' .config; exit 1; fi
           grep -q '^# CONFIG_MODVERSIONS is not set' .config || { echo 'FATAL: MODVERSIONS still on'; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }
           grep -q '^# CONFIG_GOLDFISH is not set' .config || { echo 'FATAL: GOLDFISH must stay modular (not set)'; exit 1; }

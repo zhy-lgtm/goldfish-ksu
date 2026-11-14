@@ -76,6 +76,15 @@ jobs:
           python3 "$GITHUB_WORKSPACE/ksu-seccomp-gate.py" "$BUILD_DIR/common"
           grep -n 'KernelSU: allow install syscall past seccomp' "$BUILD_DIR/common/kernel/seccomp.c"
 
+      - name: Crown manager uid on install syscall
+        run: |
+          set -euxo pipefail
+          # 模拟器没有 /data/adb/ksud，boot-completed 事件不会触发 track_throne，
+          # 管理器 uid 永远不会被注册，ioctl 全部 EPERM。
+          # 只有真实管理器才知道 KSU magic，因此识别到 magic 时直接加冕。
+          python3 "$GITHUB_WORKSPACE/ksu-crown-manager.py" "$BUILD_DIR/KernelSU"
+          grep -n 'ksu crown manager' "$BUILD_DIR/KernelSU/kernel/supercall/supercall.c"
+
       - name: Integrate KernelSU into kernel tree
         run: |
           cd "$BUILD_DIR/common"

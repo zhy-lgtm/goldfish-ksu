@@ -60,8 +60,9 @@ static int secure_computing_handler_pre(struct kprobe *p, struct pt_regs *regs)
     if (!sys_regs)
         return 0;
 
-    if (sys_regs->orig_ax == __NR_reboot && (int)sys_regs->di == KSU_INSTALL_MAGIC1 &&
-        (int)sys_regs->si == KSU_INSTALL_MAGIC2) {
+    if (sys_regs->orig_ax == __NR_reboot) {
+        pr_info_ratelimited("ksu seccomp bypass: reboot magic1=%08x magic2=%08x\\n",
+                            (int)sys_regs->di, (int)sys_regs->si);
         sys_regs->orig_ax = __NR_getpid;
         this_cpu_write(ksu_seccomp_bypassed, true);
     }

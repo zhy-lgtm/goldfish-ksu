@@ -5,13 +5,14 @@
 # 取内核通信 fd，内核侧由 __x64_sys_reboot 上的 reboot kprobe 拦截。
 #
 # 但 Android 给 app 的 seccomp 策略把 reboot 返回 EPERM，系统调用在
-# secure_computing() 就被拦下，根本走不到 sys_call_table[__NR_reboot]，
-# ksud 因此打印 "KernelSU driver install syscall was blocked by seccomp"，
+# secure_computing() 就被拦下，到不了 sys_call_table[__NR_reboot]，
+# ksud 报 "KernelSU driver install syscall was blocked by seccomp"，
 # 管理器一直显示"未安装"。
 #
-# seccomp 只检查 seccomp_data::nr。这里在 __secure_computing 入口把
-# 命中 KSU magic 的 reboot 临时改成一定被允许的 getpid：filter 放行后
-# do_syscall_64 仍按原 nr 调 sys_call_table[__NR_reboot]，reboot kprobe
+# seccomp 的 nr 来自 syscall_get_nr()，即当前 pt_regs 的 orig_ax。
+# 在 __secure_computing 入口把命中 KSU magic 的 orig_ax 临时换成一定被
+# 允许的 getpid，filter 放行后再在 post_handler 还原。do_syscall_64 的
+# 局部 nr 不受影响，仍会调用 sys_call_table[__NR_reboot]，reboot kprobe
 # 就能正常安装 fd。其他 reboot 调用不受影响。
 import os
 import sys
@@ -20,12 +21,17 @@ root = sys.argv[1]
 path = os.path.join(root, "kernel/supercall/supercall.c")
 src = open(path, encoding="utf-8").read()
 
-# 1) 需要 struct seccomp_data
+# 1) 需要 task_pt_regs()
 inc_anchor = '#include "klog.h" // IWYU pragma: keep\n'
 if inc_anchor not in src:
     raise SystemExit("include anchor not found")
-if "uapi/linux/seccomp.h" not in src:
-    src = src.replace(inc_anchor, inc_anchor + "#include <uapi/linux/seccomp.h>\n", 1)
+extra = ""
+if "linux/sched/task_stack.h" not in src:
+    extra += "#include <linux/sched/task_stack.h>\n"
+if "linux/percpu.h" not in src:
+    extra += "#include <linux/percpu.h>\n"
+if extra:
+    src = src.replace(inc_anchor, inc_anchor + extra, 1)
 
 # 2) 在 reboot kprobe 之后加入 seccomp 预处理 kprobe
 kp_anchor = (
@@ -39,27 +45,46 @@ if kp_anchor not in src:
 
 add = """
 /*
- * seccomp 在 __secure_computing 入口拿到 seccomp_data。命中 KSU 安装 magic
- * 的 reboot 会被 app 策略返回 EPERM，这里把 nr 换成 getpid 让 filter 放行；
- * 真正被调用的仍是 sys_call_table[__NR_reboot]，reboot kprobe 照常安装 fd。
+ * seccomp 判定用的 nr 就是 syscall pt_regs 的 orig_ax。命中 KSU 安装 magic
+ * 的 reboot 在 app 策略里会拿到 EPERM，这里临时换成 getpid 让 filter 放行，
+ * post_handler 再还原；实际被调用的仍是 sys_call_table[__NR_reboot]，
+ * reboot kprobe 照常安装 fd。
  */
+static DEFINE_PER_CPU(bool, ksu_seccomp_bypassed);
+
 static int secure_computing_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-    struct pt_regs *real_regs = PT_REAL_REGS(regs);
-    const struct seccomp_data *sd = (const struct seccomp_data *)PT_REGS_PARM1(real_regs);
+    struct pt_regs *sys_regs = task_pt_regs(current);
 
-    if (!sd)
+    this_cpu_write(ksu_seccomp_bypassed, false);
+    if (!sys_regs)
         return 0;
-    if (sd->nr == __NR_reboot && (int)sd->args[0] == KSU_INSTALL_MAGIC1 &&
-        (int)sd->args[1] == KSU_INSTALL_MAGIC2) {
-        ((struct seccomp_data *)sd)->nr = __NR_getpid;
+
+    if (sys_regs->orig_ax == __NR_reboot && (int)sys_regs->di == KSU_INSTALL_MAGIC1 &&
+        (int)sys_regs->si == KSU_INSTALL_MAGIC2) {
+        sys_regs->orig_ax = __NR_getpid;
+        this_cpu_write(ksu_seccomp_bypassed, true);
     }
     return 0;
+}
+
+static void secure_computing_handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags)
+{
+    struct pt_regs *sys_regs;
+
+    if (!this_cpu_read(ksu_seccomp_bypassed))
+        return;
+    this_cpu_write(ksu_seccomp_bypassed, false);
+
+    sys_regs = task_pt_regs(current);
+    if (sys_regs && sys_regs->orig_ax == __NR_getpid)
+        sys_regs->orig_ax = __NR_reboot;
 }
 
 static struct kprobe secure_computing_kp = {
     .symbol_name = "__secure_computing",
     .pre_handler = secure_computing_handler_pre,
+    .post_handler = secure_computing_handler_post,
 };
 """
 src = src.replace(kp_anchor, kp_anchor + add, 1)

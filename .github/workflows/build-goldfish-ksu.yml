@@ -140,11 +140,15 @@ jobs:
           scripts/config --enable CFI_CLANG_SHADOW
           scripts/config --disable CFI_PERMISSIVE
           scripts/config --enable MODVERSIONS
+          # __secure_computing 里跳过 seccomp 的官方逃生门依赖此开关，
+          # 用于放行管理器的 reboot(KSU magic)。
+          scripts/config --enable CHECKPOINT_RESTORE
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
           # 断言：ThinLTO/CFI/MODVERSIONS/KSU 必须与 v13 可开机配置一致
           grep -q '^CONFIG_LTO_CLANG_THIN=y' .config || { echo 'FATAL: ThinLTO off'; grep -E 'CONFIG_LTO' .config; exit 1; }
           grep -q '^CONFIG_CFI_CLANG=y' .config || { echo 'FATAL: CFI_CLANG off'; grep -E 'CONFIG_CFI' .config; exit 1; }
           grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS off'; exit 1; }
+          grep -q '^CONFIG_CHECKPOINT_RESTORE=y' .config || { echo 'FATAL: CHECKPOINT_RESTORE off (seccomp escape hatch disabled)'; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }
           grep -q '^# CONFIG_GOLDFISH is not set' .config || { echo 'FATAL: GOLDFISH must stay modular (not set)'; exit 1; }
           rel=$(make -s ARCH=x86_64 LLVM=1 LLVM_IAS=1 kernelrelease)

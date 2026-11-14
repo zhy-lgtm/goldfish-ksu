@@ -36,9 +36,11 @@ crown = """    if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == KSU_INSTALL_MAGIC2)
 
         // Emulator image has no /data/adb/ksud, so track_throne never runs.
         // Crown the caller (the only party that knows the magic) as manager.
+        // Lock once only: root (uid 0) also reaches here via built-in su and
+        // would otherwise override the real manager's uid on every install.
         {
             uid_t caller = current_uid().val % KSU_PER_USER_RANGE;
-            if (ksu_get_manager_appid() == KSU_INVALID_APPID || ksu_get_manager_appid() != caller) {
+            if (ksu_get_manager_appid() == KSU_INVALID_APPID) {
                 pr_info("ksu crown manager uid=%u\\n", caller);
                 ksu_set_manager_appid(caller);
             }

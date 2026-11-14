@@ -112,7 +112,43 @@ src = src.replace(reg_anchor, reg_anchor + reg_add, 1)
 exit_anchor = "    unregister_kprobe(&reboot_kp);\n"
 if exit_anchor not in src:
     raise SystemExit("exit anchor not found")
-src = src.replace(exit_anchor, exit_anchor + "    unregister_kprobe(&secure_computing_kp);\n", 1)
+src = src.replace(exit_anchor, exit_anchor + "    unregister_kprobe(&secure_computing_kp);\n    unregister_kprobe(&reboot_table_kp);\n", 1)
+
+# 5) 给 reboot_handler_pre 加命中日志，确认 kprobe 是否真的被调用
+handler_head = "static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)\n{\n"
+if handler_head not in src:
+    raise SystemExit("reboot_handler_pre head not found")
+src = src.replace(
+    handler_head,
+    handler_head + '    pr_info_ratelimited("ksu reboot kprobe hit p=%px\\n", p);\n',
+    1,
+)
+
+# 6) 额外按 sys_call_table 实际地址注册一个 reboot kprobe：
+#    CFI 下符号地址和 sys_call_table 项可能不一致，双保险。
+table_kp = """
+/* sys_call_table[__NR_reboot] 才是实际被调用的入口，符号地址未必一致。 */
+static struct kprobe reboot_table_kp = {
+    .pre_handler = reboot_handler_pre,
+};
+"""
+src = src.replace(kp_anchor + add, kp_anchor + add + table_kp, 1)
+
+reg_add2 = """
+    reboot_table_kp.addr = (kprobe_opcode_t *)ksu_syscall_table[__NR_reboot];
+    pr_info("ksu reboot table entry: %px\\n", reboot_table_kp.addr);
+    rc = register_kprobe(&reboot_table_kp);
+    if (rc) {
+        pr_err("reboot table kprobe failed: %d\\n", rc);
+    } else {
+        pr_info("reboot table kprobe registered successfully\\n");
+    }
+"""
+src = src.replace(reg_add, reg_add + reg_add2, 1)
+
+# 7) 需要 ksu_syscall_table 声明
+if "hook/syscall_hook.h" not in src:
+    src = src.replace(inc_anchor, inc_anchor + '#include "hook/syscall_hook.h"\n', 1)
 
 open(path, "w", encoding="utf-8").write(src)
 print("patched:", path)

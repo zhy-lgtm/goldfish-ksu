@@ -66,6 +66,10 @@ jobs:
           ' "$F"
           sed -n '120,165p' "$F"
           sed -n '215,340p' "$F"
+          # 管理器通过 reboot(magic) 取内核通信 fd，但 app 的 seccomp 会拦 reboot。
+          # sys_enter tracepoint 在 seccomp 之前，故把 reboot 也挂到 dispatcher 绕过。
+          python3 "$GITHUB_WORKSPACE/ksu-reboot-hook.py" "$BUILD_DIR/KernelSU"
+          grep -n 'ksu_hook_reboot_passthrough' "$BUILD_DIR/KernelSU/kernel/hook/syscall_hook_manager.c"
           ls "$BUILD_DIR/KernelSU/kernel"
 
       - name: Integrate KernelSU into kernel tree

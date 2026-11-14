@@ -54,7 +54,7 @@ static DEFINE_PER_CPU(bool, ksu_seccomp_bypassed);
 
 static int secure_computing_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-    struct pt_regs *sys_regs = task_pt_regs(current);
+    struct pt_regs *sys_regs = current_pt_regs();
 
     this_cpu_write(ksu_seccomp_bypassed, false);
     if (!sys_regs)
@@ -69,6 +69,27 @@ static int secure_computing_handler_pre(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
+/* __seccomp_filter 可能直接带构造好的 sd，这里同步改掉 sd->nr。 */
+static int seccomp_filter_handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    struct pt_regs *real_regs = PT_REAL_REGS(regs);
+    struct pt_regs *sys_regs = current_pt_regs();
+    struct seccomp_data *sd = (struct seccomp_data *)PT_REGS_PARM2(real_regs);
+
+    if (!sys_regs || !sd)
+        return 0;
+    if (sys_regs->orig_ax == __NR_reboot) {
+        sd->nr = __NR_getpid;
+        pr_info_ratelimited("ksu seccomp filter bypass: sd->nr=%d\\n", sd->nr);
+    }
+    return 0;
+}
+
+static struct kprobe seccomp_filter_kp = {
+    .symbol_name = "__seccomp_filter",
+    .pre_handler = seccomp_filter_handler_pre,
+};
+
 static void secure_computing_handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags)
 {
     struct pt_regs *sys_regs;
@@ -77,7 +98,7 @@ static void secure_computing_handler_post(struct kprobe *p, struct pt_regs *regs
         return;
     this_cpu_write(ksu_seccomp_bypassed, false);
 
-    sys_regs = task_pt_regs(current);
+    sys_regs = current_pt_regs();
     if (sys_regs && sys_regs->orig_ax == __NR_getpid)
         sys_regs->orig_ax = __NR_reboot;
 }
@@ -105,6 +126,13 @@ reg_add = """
     } else {
         pr_info("secure_computing kprobe registered successfully\\n");
     }
+
+    rc = register_kprobe(&seccomp_filter_kp);
+    if (rc) {
+        pr_err("seccomp_filter kprobe failed: %d\\n", rc);
+    } else {
+        pr_info("seccomp_filter kprobe registered successfully\\n");
+    }
 """
 src = src.replace(reg_anchor, reg_anchor + reg_add, 1)
 
@@ -112,7 +140,7 @@ src = src.replace(reg_anchor, reg_anchor + reg_add, 1)
 exit_anchor = "    unregister_kprobe(&reboot_kp);\n"
 if exit_anchor not in src:
     raise SystemExit("exit anchor not found")
-src = src.replace(exit_anchor, exit_anchor + "    unregister_kprobe(&secure_computing_kp);\n    unregister_kprobe(&reboot_table_kp);\n", 1)
+src = src.replace(exit_anchor, exit_anchor + "    unregister_kprobe(&secure_computing_kp);\n    unregister_kprobe(&seccomp_filter_kp);\n    unregister_kprobe(&reboot_table_kp);\n", 1)
 
 # 5) 给 reboot_handler_pre 加命中日志，确认 kprobe 是否真的被调用
 handler_head = "static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)\n{\n"

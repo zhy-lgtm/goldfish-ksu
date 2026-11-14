@@ -124,6 +124,16 @@ jobs:
           sed -i '/plugin-opt=-stack-alignment/d' arch/x86/Makefile
           sed -n '195,210p' arch/x86/Makefile
 
+      - name: Allow factory ramdisk modules with non-CFI CRC layout
+        run: |
+          set -euxo pipefail
+          cd "$BUILD_DIR/common"
+          # 保留 MODVERSIONS 以匹配 factory .ko 的 vermagic，但关 CFI 后 struct module 的 CRC 不同。
+          # 仅在 CRC 不匹配分支放行；符号缺失等其他模块错误仍按原逻辑失败。
+          sed -i '/^bad_version:$/,+3 s/return 0;/return 1;/' kernel/module.c
+          sed -n '/^bad_version:$/,+3p' kernel/module.c
+          grep -A3 '^bad_version:$' kernel/module.c | grep -q 'return 1;'
+
       - name: Configure (stock config + exact LOCALVERSION + KSU builtin)
         run: |
           set -euxo pipefail
@@ -138,17 +148,15 @@ jobs:
           scripts/config --enable KSU
           # 原版 5.10 没打 indirect syscall 补丁，必须开启运行时补丁分发器。
           scripts/config --enable KSU_X86_PATCH_SYSCALL_DISPATCHER
-          # ===== LTO/CFI/MODVERSIONS：必须全部关闭 =====
+          # ===== LTO/CFI 关闭，MODVERSIONS 保留 =====
           # 实测两组对照：
           #  A) CFI 开 -> ramdisk .ko 能加载，但 sys_call_table 的槽指向 CFI 跳板，
-          #     KernelSU 找不到 sys_ni_syscall 空槽（"failed to find ni_syscall slot for dispatcher"），
-          #     manager 无法与内核通信 -> 显示"未安装"。
-          #  B) CFI 关 -> dispatcher installed at slot 134（manager 正常），
-          #     但原版 CFI 编译的 .ko 引用 __cfi_slowpath，内核没有该符号 -> 模块加载失败。
-          # 解法：选 B（关 CFI/LTO），并在内核里补 __cfi_slowpath 空实现导出（见下一步），
-          # 这样 .ko 能 insmod（CFI 检查退化为 no-op，模拟器场景无影响），KSU 通信也正常。
-          # MODVERSIONS 必须同时关：关 CFI 改变了 struct module 布局，module_layout 的 CRC 会变，
-          # 开着 MODVERSIONS 会导致所有 .ko 报 "disagrees about version of symbol module_layout"。
+          #     KernelSU 找不到 sys_ni_syscall 空槽，manager 显示"未安装"。
+          #  B) CFI 关 -> dispatcher installed at slot 134，但原版 .ko 需要 CFI slowpath 符号。
+          # 解法：关 CFI/LTO，并导出 __cfi_slowpath 空实现。
+          # MODVERSIONS 必须保留：它会进入 vermagic；关闭后原版 .ko 会直接报 Exec format error。
+          # 关 CFI 会改变 struct module 的 CRC，因此上一构建步骤只放宽 CRC 比较，
+          # 既保留原版 vermagic，又允许 factory ramdisk 的预编译模块按符号名加载。
           scripts/config --disable LTO_CLANG_FULL
           scripts/config --disable LTO_CLANG_THIN
           scripts/config --disable LTO_CLANG
@@ -157,14 +165,14 @@ jobs:
           scripts/config --disable CFI_CLANG
           scripts/config --disable CFI_CLANG_SHADOW
           scripts/config --disable CFI_PERMISSIVE
-          scripts/config --disable MODVERSIONS
+          scripts/config --enable MODVERSIONS
           make ARCH=x86_64 LLVM=1 LLVM_IAS=1 olddefconfig
-          # 断言：CFI/LTO/MODVERSIONS 必须关闭，KSU 必须开启
+          # 断言：CFI/LTO 必须关闭，MODVERSIONS 与 KSU 必须开启
           grep -q '^CONFIG_LTO_NONE=y' .config || { echo 'FATAL: LTO not none'; grep -E 'CONFIG_LTO' .config; exit 1; }
           # CFI_CLANG 依赖 LTO_CLANG；关闭后 Kconfig 可能完全省略该项，而不是写 "is not set"。
           # 因此只把显式 =y 视为失败，省略和 is not set 都代表已关闭。
           if grep -q '^CONFIG_CFI_CLANG=y' .config; then echo 'FATAL: CFI_CLANG still on'; grep -E 'CONFIG_CFI' .config; exit 1; fi
-          grep -q '^# CONFIG_MODVERSIONS is not set' .config || { echo 'FATAL: MODVERSIONS still on'; exit 1; }
+          grep -q '^CONFIG_MODVERSIONS=y' .config || { echo 'FATAL: MODVERSIONS off (vermagic mismatch)'; exit 1; }
           grep -q '^CONFIG_KSU=y' .config || { echo 'FATAL: KSU off'; exit 1; }
           grep -q '^# CONFIG_GOLDFISH is not set' .config || { echo 'FATAL: GOLDFISH must stay modular (not set)'; exit 1; }
           rel=$(make -s ARCH=x86_64 LLVM=1 LLVM_IAS=1 kernelrelease)

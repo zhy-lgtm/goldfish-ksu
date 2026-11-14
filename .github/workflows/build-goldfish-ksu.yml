@@ -66,11 +66,15 @@ jobs:
           ' "$F"
           sed -n '120,165p' "$F"
           sed -n '215,340p' "$F"
-          # 管理器通过 reboot(magic) 取内核通信 fd，但 app 的 seccomp 会拦 reboot。
-          # 在 __secure_computing 入口只对 KSU magic 放行，reboot kprobe 才能安装 fd。
-          python3 "$GITHUB_WORKSPACE/ksu-reboot-hook.py" "$BUILD_DIR/KernelSU"
-          grep -n 'secure_computing_kp' "$BUILD_DIR/KernelSU/kernel/supercall/supercall.c"
-          ls "$BUILD_DIR/KernelSU/kernel"
+
+      - name: Patch kernel seccomp to allow KernelSU install syscall
+        run: |
+          set -euxo pipefail
+          # app 的 seccomp 会把管理器的 reboot(KSU magic) 判成 EPERM，
+          # 导致 reboot kprobe 永远收不到安装请求，管理器显示"未安装"。
+          # 在 __secure_computing 最前面只放行这一种调用，绕过 app filter。
+          python3 "$GITHUB_WORKSPACE/ksu-seccomp-gate.py" "$BUILD_DIR/common"
+          grep -n 'KernelSU: allow install syscall past seccomp' "$BUILD_DIR/common/kernel/seccomp.c"
 
       - name: Integrate KernelSU into kernel tree
         run: |
